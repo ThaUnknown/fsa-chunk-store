@@ -3,13 +3,15 @@ import { del, set, createStore, entries } from 'idb-keyval'
 
 // this is utterly fucking retarded, but FSA can't delete files fast enough on page close?
 // so just delete the files on next load
+// note: for this to have any effect, the store needs to be destroyed before unload event!
 const idbStore = createStore('fsa-chunk-store', 'handles')
 entries(idbStore).then(entries => {
   for (const [name, rootDir] of entries) {
     rootDir.removeEntry(name, { recursive: true })
+    del(name, idbStore)
   }
 })
-class FSAChunkStore {
+export default class FSAChunkStore {
   constructor (chunkLength, opts = {}) {
     this.chunkLength = Number(chunkLength)
 
@@ -309,7 +311,7 @@ class FSAChunkStore {
       }
       if (destroying !== true) {
         const storageDir = await this.storageDirPromise
-        set('chunks', storageDir, idbStore)
+        set('chunks', storageDir, idbStore) // conflicting. oh well.
         await storageDir.removeEntry('chunks', { recursive: true })
         del('chunks', idbStore)
       }
@@ -344,5 +346,3 @@ class FSAChunkStore {
     this.close(handleClose, true)
   }
 }
-
-module.exports = FSAChunkStore
