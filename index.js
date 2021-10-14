@@ -344,3 +344,5 @@ export default class FSAChunkStore {
     this.close(handleClose, true)
   }
 }
+
+module.exports = FSAChunkStore
