@@ -9,7 +9,7 @@ entries(idbStore).then(entries => {
     rootDir.removeEntry(name, { recursive: true })
   }
 })
-export default class FSAChunkStore {
+class FSAChunkStore {
   constructor (chunkLength, opts = {}) {
     this.chunkLength = Number(chunkLength)
 
