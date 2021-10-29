@@ -284,7 +284,7 @@ export default class FSAChunkStore {
     }
   }
 
-  close (cb = () => {}, destroying) {
+  async close (cb = () => {}, destroying) {
     if (this.closed) {
       queueMicrotask(() => cb(new Error('Storage is closed')))
       return
@@ -293,19 +293,19 @@ export default class FSAChunkStore {
     this.closed = true
     this.chunkMap = []
     this.directoryMap = {}
-
-    this.cleanup(destroying)
-
+    await this.cleanup(destroying)
     queueMicrotask(() => {
       cb(null)
     })
   }
 
   async cleanup (destroying) {
+    this.chunks = []
     if (this.files) {
+      const promises = []
       for (const file of this.files) {
         if (file.stream) {
-          await (await file.stream).close()
+          promises.push(await (await file.stream).close())
           file.stream = null
         }
       }
@@ -315,8 +315,8 @@ export default class FSAChunkStore {
         await storageDir.removeEntry('chunks', { recursive: true })
         del('chunks', idbStore)
       }
+      await Promise.all(promises)
     }
-    this.chunks = []
   }
 
   async destroy (cb = () => {}) {
@@ -327,12 +327,7 @@ export default class FSAChunkStore {
     const rootDir = await this.rootDirPromise
     set(this.name, rootDir, idbStore)
 
-    const handleClose = async err => {
-      if (err) {
-        cb(err)
-        return
-      }
-
+    const handleClose = async () => {
       try {
         await rootDir.removeEntry(this.name, { recursive: true })
         del(this.name, idbStore)
