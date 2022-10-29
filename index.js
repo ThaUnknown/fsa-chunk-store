@@ -1,16 +1,10 @@
-/* eslint-env browser */
-import { del, set, createStore, entries } from 'idb-keyval'
-
-// this is utterly fucking retarded, but FSA can't delete files fast enough on page close?
-// so just delete the files on next load
-// note: for this to have any effect, the store needs to be destroyed before unload event!
-const idbStore = createStore('fsa-chunk-store', 'handles')
-entries(idbStore).then(entries => {
-  for (const [name, rootDir] of entries) {
-    rootDir.removeEntry(name, { recursive: true })
-    del(name, idbStore)
-  }
+// this can be bad when multiple instances of this app are running
+navigator.storage.getDirectory().then(storageDir => {
+  storageDir.removeEntry('chunks', { recursive: true })
 })
+
+const noop = () => {}
+const err = (cb = noop, err) => queueMicrotask(() => cb(new Error(err)))
 export default class FSAChunkStore {
   constructor (chunkLength, opts = {}) {
     this.chunkLength = Number(chunkLength)
@@ -21,18 +15,24 @@ export default class FSAChunkStore {
 
     this.closed = false
 
-    this.name = opts.name || 'default'
-
-    this.rootDirPromise = opts.rootDir || navigator.storage.getDirectory()
-    this.storageDirPromise = this._getStorageDirectoryHandle()
-    this.chunksDirPromise = ((opts.files && opts.rootDir) && this._getChunksDirHandle()) || this.storageDirPromise
+    this.name = opts.name || crypto.randomUUID()
 
     this.chunks = [] // individual chunks, required for reads :/
-    this.chunkMap = [] // full files
-    this.directoryMap = {}
+
+    this.rootDirPromise = opts.rootDir || navigator.storage.getDirectory()
+    this.storageDirPromise = (async () => {
+      const rootDir = await this.rootDirPromise
+      return rootDir.getDirectoryHandle(this.name, { create: true })
+    })()
+    // if there are no files the chunks are the storage
+    this.chunksDirPromise = this.storageDirPromise
 
     if (opts.files && opts.rootDir) {
-      this.files = opts.files.slice(0).map((file, i, files) => {
+      this.chunkMap = [] // full files
+      this.directoryMap = {}
+      // if files exist, use throwaway, wipeable folder for chunks which are a cache
+      this.chunksDirPromise = this._getChunksDirHandle()
+      this.files = opts.files.map((file, i, files) => {
         if (file.path == null) throw new Error('File is missing `path` property')
         if (file.length == null) throw new Error('File is missing `length` property')
         if (file.offset == null) {
@@ -45,9 +45,8 @@ export default class FSAChunkStore {
         }
 
         // file handles
-        if (file.handle == null) {
-          file.handle = this._createFileHandle({ path: file.path })
-        }
+        if (file.handle == null) file.handle = this._createFileHandle({ path: file.path })
+        file.blob = this._createBlobReference(file.handle)
 
         // file chunkMap
         const fileStart = file.offset
@@ -56,24 +55,24 @@ export default class FSAChunkStore {
         const firstChunk = Math.floor(fileStart / this.chunkLength)
         const lastChunk = Math.floor((fileEnd - 1) / this.chunkLength)
 
-        for (let p = firstChunk; p <= lastChunk; ++p) {
-          const chunkStart = p * this.chunkLength
+        for (let i = firstChunk; i <= lastChunk; ++i) {
+          const chunkStart = i * this.chunkLength
           const chunkEnd = chunkStart + this.chunkLength
 
           const from = (fileStart < chunkStart) ? 0 : fileStart - chunkStart
           const to = (fileEnd > chunkEnd) ? this.chunkLength : fileEnd - chunkStart
           const offset = (fileStart > chunkStart) ? 0 : chunkStart - fileStart
 
-          if (!this.chunkMap[p]) this.chunkMap[p] = []
+          if (!this.chunkMap[i]) this.chunkMap[i] = []
 
-          this.chunkMap[p].push({ from, to, offset, file })
+          this.chunkMap[i].push({ from, to, offset, file })
         }
 
         return file
       })
 
       // close streams is page is frozen/unloaded, they will re-open if the user returns via BFC
-      window.addEventListener('pagehide', this.cleanup)
+      window.addEventListener('pagehide', () => this.cleanup())
 
       this.length = this.files.reduce((sum, file) => sum + file.length, 0)
       if (opts.length != null && opts.length !== this.length) {
@@ -89,26 +88,12 @@ export default class FSAChunkStore {
     }
   }
 
-  async _getChunksDirHandle () {
-    const storageDir = await this.storageDirPromise
-    return await storageDir.getDirectoryHandle('chunks', { create: true })
-  }
-
-  async _getStorageDirectoryHandle () {
-    const rootDir = await this.rootDirPromise
-    return await rootDir.getDirectoryHandle(this.name, { create: true })
-  }
-
-  async _getChunk (index) {
+  async _getChunkHandle (index) {
     let chunk = this.chunks[index]
-
     if (!chunk) {
-      const fileName = index.toString()
       const storageDir = await this.chunksDirPromise
-
-      chunk = this.chunks[index] = { fileHandlePromise: storageDir.getFileHandle(fileName, { create: true }) }
+      this.chunks[index] = chunk = await storageDir.getFileHandle(index, { create: true })
     }
-
     return chunk
   }
 
@@ -117,227 +102,184 @@ export default class FSAChunkStore {
     return (await this._getDirectoryHandle(opts)).getFileHandle(fileName, { create: true })
   }
 
+  async _createBlobReference (handle) {
+    return (await handle).getFile()
+  }
+
   // recursive, equiv of cd and mkdirp
   async _getDirectoryHandle (opts) {
     const lastIndex = opts.path.lastIndexOf('/')
     if (lastIndex === -1 || lastIndex === 0) return this.storageDirPromise
     const path = opts.path = opts.path.slice(0, lastIndex)
     if (!this.directoryMap[path]) {
-      const parent = this._getDirectoryHandle(opts)
-      this.directoryMap[path] = (await parent).getDirectoryHandle(path.slice(path.lastIndexOf('/') + 1), { create: true })
+      this.directoryMap[path] = (async () => {
+        const parent = await this._getDirectoryHandle(opts)
+        return parent.getDirectoryHandle(path.slice(path.lastIndexOf('/') + 1), { create: true })
+      })()
     }
     return this.directoryMap[path]
   }
 
-  put (index, buf, cb = () => {}) {
-    if (this.closed) {
-      queueMicrotask(() => cb(new Error('Storage is closed')))
-      return
-    }
+  async _getChunksDirHandle () {
+    const storageDir = await navigator.storage.getDirectory()
+    const chunksDir = await storageDir.getDirectoryHandle('chunks', { create: true })
+    return chunksDir.getDirectoryHandle(this.name, { create: true })
+  }
 
-    const isLastChunk = index === this.lastChunkIndex
-    if (isLastChunk && buf.length !== this.lastChunkLength) {
-      queueMicrotask(() => {
-        cb(new Error(`Last chunk length must be ${this.lastChunkLength}`))
-      })
-      return
-    }
-    if (!isLastChunk && buf.length !== this.chunkLength) {
-      queueMicrotask(() => {
-        cb(new Error(`Chunk length must be ${this.chunkLength}`))
-      })
-      return
-    }
-
-    ;(async () => {
-      try {
-        const chunk = await this._getChunk(index)
-        const fileHandle = await chunk.fileHandlePromise
-        const stream = await fileHandle.createWritable({
-          keepExistingData: false
-        })
-        await stream.write(buf)
-        await stream.close()
-      } catch (err) {
-        cb(err)
-        return
-      }
-
-      if (!this.files) cb(null)
-    })()
-
-    if (this.files) {
-      const targets = this.chunkMap[index]
-      if (!targets) {
-        queueMicrotask(() => cb(new Error('No files matching the request range')))
-      }
-      const promises = targets.map(target => {
-        return (async () => {
-          try {
-            const { file } = target
-            if (!file.stream) {
-              file.stream = (await file.handle).createWritable({
-                keepExistingData: true
-              })
-            }
-            const stream = await file.stream
-            await stream.write({ type: 'write', position: target.offset, data: buf.slice(target.from, target.to) })
-            return null
-          } catch (err) {
-            return cb(err)
-          }
-        })()
-      })
-      Promise.all(promises).then(() => cb(null))
+  async put (index, buf, cb = noop) {
+    try {
+      await this._put(index, buf)
+      cb(null)
+      return null
+    } catch (e) {
+      queueMicrotask(() => cb(e))
+      return e
     }
   }
 
-  get (index, opts, cb = () => {}) {
-    if (typeof opts === 'function') {
-      return this.get(index, null, opts)
+  // wrapped in prep for callback drop
+  async _put (index, buf) {
+    if (this.closed) throw new Error('Storage is closed')
+
+    const isLastChunk = index === this.lastChunkIndex
+    if (isLastChunk && buf.length !== this.lastChunkLength) throw new Error(`Last chunk length must be ${this.lastChunkLength}`)
+    if (!isLastChunk && buf.length !== this.chunkLength) throw new Error(`Chunk length must be ${this.chunkLength}`)
+
+    const chunkWrite = (async () => {
+      const chunk = await this._getChunkHandle(index)
+      const stream = await chunk.createWritable({ keepExistingData: false })
+      await stream.write(buf)
+      await stream.close()
+    })()
+
+    if (!this.files) return chunkWrite
+
+    const targets = this.chunkMap[index]
+    if (!targets) throw new Error('No files matching the request range')
+    const promises = targets.map(async ({ file, offset, from, to }) => {
+      if (!file.stream) {
+        file.stream = await (await file.handle).createWritable({
+          keepExistingData: true
+        })
+      }
+      await file.stream.write({ type: 'write', position: offset, data: buf.slice(from, to) })
+    })
+    promises.push(chunkWrite)
+    await Promise.all(promises)
+  }
+
+  async get (index, opts, cb = noop) {
+    if (opts == null) opts = {}
+    try {
+      const data = await this._get(index, opts)
+      cb(null, data)
+      return data
+    } catch (e) {
+      cb(e)
+      return e
     }
-    if (this.closed) {
-      queueMicrotask(() => cb(new Error('Storage is closed')))
-      return
-    }
+  }
+
+  // wrapped in prep for callback drop
+  async _get (index, opts) {
+    if (typeof opts === 'function') return this.get(index, undefined, opts)
+    if (this.closed) throw new Error('Storage is closed')
 
     const isLastChunk = index === this.lastChunkIndex
     const chunkLength = isLastChunk ? this.lastChunkLength : this.chunkLength
-
-    if (!opts) opts = {}
 
     const rangeFrom = opts.offset || 0
     const rangeTo = opts.length ? rangeFrom + opts.length : chunkLength
     const len = opts.length || chunkLength - rangeFrom
 
+    if (rangeFrom < 0 || rangeFrom < 0 || rangeTo > chunkLength) throw new Error('Invalid offset and/or length')
+
+    if (rangeFrom === rangeTo) return new Uint8Array(0)
+
     if (!this.files || this.chunks[index]) {
-      ;(async () => {
-        let buf
-        try {
-          const chunk = await this._getChunk(index)
-          const fileHandle = await chunk.fileHandlePromise
-          let file = await fileHandle.getFile()
-          if (rangeFrom !== 0 || len !== chunkLength) {
-            file = file.slice(rangeFrom, len + rangeFrom)
-          }
-          buf = await file.arrayBuffer()
-        } catch (err) {
-          cb(err)
-          return
-        }
-
-        if (buf.byteLength === 0) {
-          const err = new Error(`Index ${index} does not exist`)
-          err.notFound = true
-          cb(err)
-          return
-        }
-
-        cb(null, new Uint8Array(buf))
-      })()
-    } else {
-      let targets = this.chunkMap[index]
-      if (!targets) {
-        queueMicrotask(() => cb(new Error('No files matching the request range')))
+      const chunk = await this._getChunkHandle(index)
+      let file = await chunk.getFile()
+      if (rangeFrom !== 0 || len !== chunkLength) {
+        file = file.slice(rangeFrom, len + rangeFrom)
       }
-      if (opts) {
-        targets = targets.filter(target => {
-          return target.to > rangeFrom && target.from < rangeTo
-        })
-        if (targets.length === 0) {
-          queueMicrotask(() => cb(new Error('No files matching the request range')))
-        }
-      }
-      if (rangeFrom === rangeTo) return queueMicrotask(() => cb(null, new Uint8Array(0)))
+      const buf = await file.arrayBuffer()
 
-      const promises = targets.map(target => {
-        return (async () => {
-          let from = target.from
-          let to = target.to
-          let offset = target.offset
-
-          if (opts) {
-            if (to > rangeTo) to = rangeTo
-            if (from < rangeFrom) {
-              offset += (rangeFrom - from)
-              from = rangeFrom
-            }
-          }
-          try {
-            const handle = await target.file.handle
-            const file = (await handle.getFile()).slice(offset, offset + to - from)
-            return await file.arrayBuffer()
-          } catch (err) {
-            return err
-          }
-        })()
-      })
-      Promise.all(promises).then(values => {
-        if (values.length === 1) {
-          cb(null, new Uint8Array(values[0]))
-        } else {
-          new Blob(values).arrayBuffer().then(buf => {
-            cb(null, new Uint8Array(buf))
-          })
-        }
-      })
+      if (buf.byteLength === 0) throw new Error(`Index ${index} does not exist`)
+      return new Uint8Array(buf)
     }
+
+    // if chunk was GC'ed
+    let targets = this.chunkMap[index]
+    if (!targets) throw new Error('No files matching the request range')
+    if (opts) {
+      targets = targets.filter(({ from, to }) => to > rangeFrom && from < rangeTo)
+      if (targets.length === 0) throw new Error('No files matching the request range')
+    }
+
+    const promises = targets.map(async ({ from, to, offset, file }) => {
+      if (opts) {
+        if (to > rangeTo) to = rangeTo
+        if (from < rangeFrom) {
+          offset += (rangeFrom - from)
+          from = rangeFrom
+        }
+      }
+      const blob = await file.blob
+      return blob.slice(offset, offset + to - from)
+    })
+    const values = await Promise.all(promises)
+    const buf = values.length === 1 ? await values[0].arrayBuffer() : await new Blob(values).arrayBuffer()
+    if (buf.byteLength === 0) throw new Error(`Index ${index} does not exist`)
+    return new Uint8Array(buf)
   }
 
-  async close (cb = () => {}, destroying) {
-    if (this.closed) {
-      queueMicrotask(() => cb(new Error('Storage is closed')))
-      return
-    }
+  async close (cb = noop) {
+    if (this.closed) return err(cb, 'Storage is closed')
 
     this.closed = true
-    this.chunkMap = []
-    this.directoryMap = {}
-    await this.cleanup(destroying)
-    queueMicrotask(() => {
-      cb(null)
-    })
+    this.chunkMap = null
+    this.directoryMap = null
+    if (this.files) await this.cleanup()
+    queueMicrotask(() => cb(null))
   }
 
-  async cleanup (destroying) {
-    this.chunks = []
-    if (this.files) {
-      const promises = []
-      for (const file of this.files) {
-        if (file.stream) {
-          promises.push(await (await file.stream).close())
-          file.stream = null
-        }
+  async cleanup () {
+    const streams = []
+    for (const file of this.files) {
+      if (file.stream) {
+        streams.push(file.stream.close())
+        file.stream = null
       }
-      if (destroying !== true) {
-        const storageDir = await this.storageDirPromise
-        set('chunks', storageDir, idbStore) // conflicting. oh well.
-        await storageDir.removeEntry('chunks', { recursive: true })
-        del('chunks', idbStore)
-      }
-      await Promise.all(promises)
     }
+    const clearChunks = (async () => {
+      const storageDir = await this.chunksDirPromise
+      this.chunks = []
+      for await (const key of storageDir.keys()) {
+        await storageDir.removeEntry(key, { recursive: true })
+      }
+      this.chunksDirPromise = await this._getChunksDirHandle()
+    })()
+    await Promise.all(streams)
+    for (const file of this.files) {
+      file.blob = this._createBlobReference(file.handle)
+    }
+    await clearChunks
   }
 
-  async destroy (cb = () => {}) {
-    if (this.closed) {
-      queueMicrotask(() => cb(new Error('Storage is closed')))
-      return
-    }
-    const rootDir = await this.rootDirPromise
-    set(this.name, rootDir, idbStore)
-
-    const handleClose = async () => {
+  async destroy (cb = noop) {
+    this.close(async (err) => {
+      if (err) {
+        cb(err)
+        return
+      }
       try {
+        const rootDir = await this.rootDirPromise
         await rootDir.removeEntry(this.name, { recursive: true })
-        del(this.name, idbStore)
       } catch (err) {
         cb(err)
         return
       }
       cb(null)
-    }
-
-    this.close(handleClose, true)
+    })
   }
 }
