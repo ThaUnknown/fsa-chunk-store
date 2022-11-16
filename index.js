@@ -1,7 +1,9 @@
 // this can be bad when multiple instances of this app are running
-navigator.storage.getDirectory().then(storageDir => {
-  storageDir.removeEntry('chunks', { recursive: true })
-})
+if ('getDirectory' in navigator.storage) {
+  navigator.storage.getDirectory().then(storageDir => {
+    storageDir.removeEntry('chunks', { recursive: true })
+  })
+}
 
 const noop = () => {}
 const err = (cb = noop, err) => queueMicrotask(() => cb(new Error(err)))
