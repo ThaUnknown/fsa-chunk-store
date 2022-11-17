@@ -1,5 +1,5 @@
 // this can be bad when multiple instances of this app are running
-if ('getDirectory' in navigator.storage) {
+if (typeof navigator !== 'undefined' && 'getDirectory' in navigator.storage) {
   navigator.storage.getDirectory().then(storageDir => {
     storageDir.removeEntry('chunks', { recursive: true })
   })
