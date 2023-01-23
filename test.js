@@ -1,6 +1,6 @@
-const FSAChunkStore = require('./index.js')
-const tape = require('tape')
-const parallel = require('run-parallel')
+import FSAChunkStore from './index.js'
+import tape from 'tape'
+import parallel from 'run-parallel'
 
 abstractTests(tape, FSAChunkStore)
 abstractTests(tape, function (len, opts = {}) { return new FSAChunkStore(len, { ...opts, rootDir: navigator.storage.getDirectory() }) })

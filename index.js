@@ -1,5 +1,5 @@
 // this can be bad when multiple instances of this app are running
-if (typeof navigator !== 'undefined' && 'getDirectory' in navigator.storage) {
+if (typeof navigator !== 'undefined' && navigator.storage?.getDirectory) {
   navigator.storage.getDirectory().then(storageDir => {
     storageDir.removeEntry('chunks', { recursive: true })
   })
@@ -13,6 +13,10 @@ export default class FSAChunkStore {
 
     if (!this.chunkLength) {
       throw new Error('First argument must be a chunk length')
+    }
+
+    if (typeof navigator === 'undefined' || !navigator.storage?.getDirectory) {
+      throw new Error('FSA API is not supported')
     }
 
     this.closed = false
