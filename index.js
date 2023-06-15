@@ -1,3 +1,7 @@
+import getFileRegex from 'filename-reserved-regex'
+
+const RESERVED_FILENAME_REGEX = getFileRegex()
+
 // this can be bad when multiple instances of this app are running
 if (typeof navigator !== 'undefined' && navigator.storage?.getDirectory) {
   navigator.storage.getDirectory().then(storageDir => {
@@ -105,7 +109,7 @@ export default class FSAChunkStore {
 
   async _createFileHandle (opts) {
     const fileName = opts.path.slice(opts.path.lastIndexOf('/') + 1)
-    return (await this._getDirectoryHandle(opts)).getFileHandle(fileName, { create: true })
+    return (await this._getDirectoryHandle(opts)).getFileHandle(fileName.replace(RESERVED_FILENAME_REGEX, ''), { create: true })
   }
 
   async _createBlobReference (handle) {

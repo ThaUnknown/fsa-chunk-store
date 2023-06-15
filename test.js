@@ -216,19 +216,21 @@ function abstractTests (test, Store) {
 
   test('test `put` without callback - error should be silent', function (t) {
     const store = new Store(10)
-    store.put(0, textToArr('01234'))
-    store.destroy(function (err) {
-      t.error(err)
-      t.end()
+    store.put(0, textToArr('01234'), () => {
+      store.destroy(function (err) {
+        t.error(err)
+        t.end()
+      })
     })
   })
 
   test('test `put` without callback - success should be silent', function (t) {
     const store = new Store(10)
-    store.put(0, textToArr('0123456789'))
-    store.destroy(function (err) {
-      t.error(err)
-      t.end()
+    store.put(0, textToArr('01234'), () => {
+      store.destroy(function (err) {
+        t.error(err)
+        t.end()
+      })
     })
   })
 
