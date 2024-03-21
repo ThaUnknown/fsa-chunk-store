@@ -5,7 +5,7 @@ const RESERVED_FILENAME_REGEX = getFileRegex()
 // this can be bad when multiple instances of this app are running
 if (typeof navigator !== 'undefined' && navigator.storage?.getDirectory) {
   navigator.storage.getDirectory().then(storageDir => {
-    storageDir.removeEntry('chunks', { recursive: true })
+    storageDir.removeEntry('chunks', { recursive: true }).catch(() => {})
   })
 }
 
