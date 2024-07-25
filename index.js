@@ -1,17 +1,36 @@
 import getFileRegex from 'filename-reserved-regex'
+import './createWritable.js'
 
 const RESERVED_FILENAME_REGEX = getFileRegex()
 
 // this can be bad when multiple instances of this app are running
-if (typeof navigator !== 'undefined' && navigator.storage?.getDirectory) {
+if (globalThis.navigator?.storage?.getDirectory) {
   navigator.storage.getDirectory().then(storageDir => {
     storageDir.removeEntry('chunks', { recursive: true }).catch(() => {})
   })
 }
 
-const noop = () => {}
+const noop = (_, __) => {}
 const err = (cb = noop, err) => queueMicrotask(() => cb(new Error(err)))
 export default class FSAChunkStore {
+  name = ''
+
+  chunks = [] // individual chunks, required for reads :/
+  chunkMap = [] // full files
+  directoryMap = {}
+  files
+
+  rootDirPromise
+  storageDirPromise
+  chunksDirPromise
+
+  closing = false
+  closed = false
+
+  /**
+   * @param {number} chunkLength
+   * @param {{ name?: string, rootDir?: Promise<FileSystemDirectoryHandle>, length?: number, files?: {path: string, length: number, offset?: number, handle?: Promise<FileSystemFileHandle>, blob?: Promise<Blob>, stream?: Promise<FileSystemWritableFileStream> }[] }} [opts]
+   */
   constructor (chunkLength, opts = {}) {
     this.chunkLength = Number(chunkLength)
 
@@ -19,15 +38,13 @@ export default class FSAChunkStore {
       throw new Error('First argument must be a chunk length')
     }
 
-    if (typeof navigator === 'undefined' || !navigator.storage?.getDirectory) {
+    if (!globalThis.navigator?.storage?.getDirectory) {
       throw new Error('FSA API is not supported')
     }
 
     this.closed = false
 
     this.name = opts.name || crypto.randomUUID()
-
-    this.chunks = [] // individual chunks, required for reads :/
 
     this.rootDirPromise = opts.rootDir || navigator.storage.getDirectory()
     this.storageDirPromise = (async () => {
@@ -38,8 +55,6 @@ export default class FSAChunkStore {
     this.chunksDirPromise = this.storageDirPromise
 
     if (opts.files && opts.rootDir) {
-      this.chunkMap = [] // full files
-      this.directoryMap = {}
       // if files exist, use throwaway, wipeable folder for chunks which are a cache
       this.chunksDirPromise = this._getChunksDirHandle()
       this.files = opts.files.map((file, i, files) => {
@@ -107,6 +122,9 @@ export default class FSAChunkStore {
     return chunk
   }
 
+  /**
+   * @param {{path: string}} opts
+   */
   async _createFileHandle (opts) {
     const fileName = opts.path.slice(opts.path.lastIndexOf('/') + 1)
     return (await this._getDirectoryHandle(opts)).getFileHandle(fileName.replace(RESERVED_FILENAME_REGEX, ''), { create: true })
@@ -116,7 +134,11 @@ export default class FSAChunkStore {
     return (await handle).getFile()
   }
 
-  // recursive, equiv of cd and mkdirp
+  /**
+   * recursive, equiv of cd and mkdirp
+   * @param {{path: string}} opts
+   * @returns {Promise<FileSystemDirectoryHandle>}
+   */
   async _getDirectoryHandle (opts) {
     const lastIndex = opts.path.lastIndexOf('/')
     if (lastIndex === -1 || lastIndex === 0) return this.storageDirPromise
@@ -147,6 +169,13 @@ export default class FSAChunkStore {
     }
   }
 
+  /**
+   * @param {Promise<FileSystemFileHandle>} handle
+   */
+  async getStreamForHandle (handle) {
+    return (await handle).createWritable({ keepExistingData: true })
+  }
+
   // wrapped in prep for callback drop
   async _put (index, buf) {
     if (this.closed) throw new Error('Storage is closed')
@@ -168,11 +197,9 @@ export default class FSAChunkStore {
     if (!targets) throw new Error('No files matching the request range')
     const promises = targets.map(async ({ file, offset, from, to }) => {
       if (!file.stream) {
-        file.stream = await (await file.handle).createWritable({
-          keepExistingData: true
-        })
+        file.stream = this.getStreamForHandle(file.handle)
       }
-      await file.stream.write({ type: 'write', position: offset, data: buf.slice(from, to) })
+      await (await file.stream).write({ type: 'write', position: offset, data: buf.slice(from, to) })
     })
     promises.push(chunkWrite)
     await Promise.all(promises)
@@ -196,7 +223,7 @@ export default class FSAChunkStore {
     if (this.closed) throw new Error('Storage is closed')
 
     const isLastChunk = index === this.lastChunkIndex
-    const chunkLength = isLastChunk ? this.lastChunkLength : this.chunkLength
+    const chunkLength = isLastChunk ? /** @type {number} */(this.lastChunkLength) : this.chunkLength
 
     const rangeFrom = opts.offset || 0
     const rangeTo = opts.length ? rangeFrom + opts.length : chunkLength
@@ -244,30 +271,34 @@ export default class FSAChunkStore {
   }
 
   async close (cb = noop) {
-    if (this.closed) return err(cb, 'Storage is closed')
+    if (this.closing) return err(cb, 'Storage is closed')
 
-    this.closed = true
-    this.chunkMap = null
-    this.directoryMap = null
+    this.closing = true
+    this.chunkMap = undefined
+    this.directoryMap = undefined
     if (this.files) await this.cleanup()
+    this.closed = true
     queueMicrotask(() => cb(null))
   }
 
   async cleanup () {
+    if (this.closed || !this.files) return
     const streams = []
     for (const file of this.files) {
       if (file.stream) {
-        streams.push(file.stream.close())
-        file.stream = null
+        streams.push(file.stream.then(stream => stream.close()))
+        file.stream = undefined
       }
     }
     const clearChunks = (async () => {
       const storageDir = await this.chunksDirPromise
       this.chunks = []
+      // .remove() doesnt exist on firefox or safari
       for await (const key of storageDir.keys()) {
         await storageDir.removeEntry(key, { recursive: true })
       }
-      this.chunksDirPromise = await this._getChunksDirHandle()
+      this.chunksDirPromise = this._getChunksDirHandle()
+      await this.chunksDirPromise
     })()
     await Promise.all(streams)
     for (const file of this.files) {
@@ -278,16 +309,13 @@ export default class FSAChunkStore {
 
   async destroy (cb = noop) {
     this.close(async (err) => {
-      if (err) {
-        cb(err)
-        return
-      }
+      if (err) return cb(err)
       try {
         const rootDir = await this.rootDirPromise
+        // .remove() doesnt exist on firefox or safari
         await rootDir.removeEntry(this.name, { recursive: true })
       } catch (err) {
-        cb(err)
-        return
+        return cb(err)
       }
       cb(null)
     })
