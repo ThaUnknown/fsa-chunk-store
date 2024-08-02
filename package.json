@@ -10,15 +10,10 @@
     "url": "https://github.com/ThaUnknown/fsa-chunk-store/issues"
   },
   "devDependencies": {
-    "@babel/core": "^7.20.12",
-    "@babel/plugin-syntax-import-assertions": "^7.20.0",
-    "@babel/preset-env": "^7.20.2",
-    "airtap": "^4.0.4",
-    "airtap-manual": "^1.0.0",
-    "babelify": "^10.0.0",
+    "@testing-library/dom": "^10.4.0",
+    "@vitest/browser": "^2.0.5",
     "run-parallel": "^1.2.0",
-    "tap-spec": "^5.0.0",
-    "tape": "^5.6.1"
+    "vitest": "^2.0.5"
   },
   "homepage": "https://github.com/ThaUnknown/fsa-chunk-store",
   "keywords": [
@@ -40,7 +35,8 @@
     "url": "git://github.com/ThaUnknown/fsa-chunk-store.git"
   },
   "scripts": {
-    "test": "airtap --preset local -- ./test.js | tap-spec"
+    "test": "airtap --preset local -- ./test.js | tap-spec",
+    "test:browser": "vitest"
   },
   "dependencies": {
     "filename-reserved-regex": "^3.0.0"
