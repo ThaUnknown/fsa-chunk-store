@@ -35,8 +35,7 @@
     "url": "git://github.com/ThaUnknown/fsa-chunk-store.git"
   },
   "scripts": {
-    "test": "airtap --preset local -- ./test.js | tap-spec",
-    "test:browser": "vitest"
+    "test": "vitest"
   },
   "dependencies": {
     "filename-reserved-regex": "^3.0.0"

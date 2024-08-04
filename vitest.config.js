@@ -1,13 +1,12 @@
 import { defineConfig } from 'vitest/config'
 
-
 export default defineConfig({
   test: {
     browser: {
       enabled: true,
       name: 'chrome',
-      provider: 'preview',
+      provider: 'preview'
     },
-    include: ["test.js"]
-  },
+    include: ['test.js']
+  }
 })
